@@ -142,6 +142,7 @@ if __name__ == "__main__":
         outputgallery_sendto_inpaint,
         outputgallery_sendto_outpaint,
         outputgallery_sendto_upscaler,
+        minigpt4_web,
     )
 
     # init global sd pipeline and config
@@ -198,8 +199,10 @@ if __name__ == "__main__":
                 stablelm_chat.render()
             with gr.TabItem(label="LoRA Training(Experimental)", id=7):
                 lora_train_web.render()
+            with gr.TabItem(label="MiniGPT4 WIP (Experimental)", id=8):
+                minigpt4_web.render()
             if args.output_gallery:
-                with gr.TabItem(label="Output Gallery", id=8) as og_tab:
+                with gr.TabItem(label="Output Gallery", id=9) as og_tab:
                     outputgallery_web.render()
 
                 # extra output gallery configuration

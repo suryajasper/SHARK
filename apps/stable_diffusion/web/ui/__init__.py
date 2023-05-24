@@ -86,3 +86,4 @@ from apps.stable_diffusion.web.ui.outputgallery_ui import (
     outputgallery_sendto_outpaint,
     outputgallery_sendto_upscaler,
 )
+from apps.stable_diffusion.web.ui.minigpt4.minigpt4_ui import minigpt4_web
