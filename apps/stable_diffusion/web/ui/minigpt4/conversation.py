@@ -11,10 +11,10 @@ from typing import List, Any
 
 # SHARK dependencies
 # from shark.shark_inference import SharkInference
-# from apps.stable_diffusion.src.utils import (
-#     compile_through_fx,
-#     args,
-# )
+from apps.stable_diffusion.src.utils import (
+    compile_through_fx,
+    args,
+)
 import random
 import contextlib
 import re
@@ -341,6 +341,106 @@ class StoppingCriteriaSub(StoppingCriteria):
         return False
 
 
+import torch
+
+import torch_mlir
+from shark.shark_importer import import_with_fx
+import torchvision.models as models
+import copy
+import io
+import numpy as np
+
+
+# Custom shark backend.
+def shark_backend(fx_g, inputs, device:str = "cuda"):
+    ts_graph = torch.jit.script(fx_g)
+    mlir_module = torch_mlir.compile(ts_graph, inputs, output_type="linalg-on-tensors")
+    bytecode_stream = io.BytesIO()
+    mlir_module.operation.write_bytecode(bytecode_stream)
+    bytecode = bytecode_stream.getvalue()
+    from shark.shark_inference import SharkInference
+    shark_module = SharkInference(
+            mlir_module=bytecode, device=device, mlir_dialect="tm_tensor",
+    )
+    shark_module.compile(extra_args=[])
+    output = shark_module("forward", inputs)
+    return output
+
+
+
+# Counts the total no. of callable nodes in the graph.
+def count_total_nodes(fx_g):
+    count:int = 0
+
+    for node in fx_g.graph.nodes:
+        if node.op == "call_function":
+            count += 1
+
+    return count
+
+
+
+# Breaks the graph at the required position.
+def break_at_pos(fx_g, pos: int):
+    count:int = 0
+    output_node = None
+
+    # First capture the output node since we have to add the new output node before the previous output_node. 
+    for node in fx_g.graph.nodes:
+        if node.op == "output":
+            output_node = node
+            break
+
+    # Break at the required position given by the search.
+    for node in fx_g.graph.nodes:
+        if node.op == "call_function":
+            # TODO: Check here that the node is not of the form of empty tensor etc.
+            if count == pos:
+                with fx_g.graph.inserting_before(output_node):
+                    fx_g.graph.output(node)
+                    break
+            count += 1
+
+    fx_g.graph.lint()
+    fx_g.recompile()
+    return fx_g
+
+
+def check_output(orig_out, comp_out):
+    if type(orig_out) == tuple:
+        for i,j in zip(orig_out, comp_out):
+            get_val = np.allclose(i.cpu().detach().numpy(), j, rtol=1e-2, atol=1e-3)
+            if (get_val == False):
+                return get_val
+    else:
+        get_val =  np.allclose(orig_out.cpu().detach().numpy(), comp_out, rtol=1e-2, atol=1e-3)
+    return get_val
+
+
+def binary_search_faulty_graph(fx_g, inputs, backend):
+    orig_out = fx_g(*inputs)
+    # print("Via fx_g: ",orig_out)
+    out = backend(fx_g, inputs)
+    ret = check_output(orig_out, out)
+    return ret
+
+
+# Break the graph at the position.
+def bin_search(fx_graph, total_nodes):
+    l = 0
+    u = total_nodes
+    while l<=u:
+        mid = (l + u) // 2
+        print(f"\nBreaking at {mid}")
+        fx_g = break_at_pos(copy.deepcopy(fx_graph), mid)
+        ret = binary_search_faulty_graph(fx_g, input, shark_backend)
+        if ret == True:
+            print("Outputs matched so far")
+            l = mid+1
+        else:
+            print("Some outputs didn't match - trying to find a shorter graph")
+            u = mid-1
+
 CONV_VISION = Conversation(
     system="Give the following image: <Img>ImageContent</Img>. "
            "You will be able to see the image once I provide it to you. Please answer my questions.",
@@ -351,7 +451,7 @@ CONV_VISION = Conversation(
     sep="###",
 )
 
-# args.device = "cuda"
+args.device = "cuda"
 def get_vision_model(ln_vision, visual_encoder):
     class VisionModel(torch.nn.Module):
         def __init__(self, ln_vision, visual_encoder):
@@ -362,7 +462,7 @@ def get_vision_model(ln_vision, visual_encoder):
             image_embeds = self.ln_vision(self.visual_encoder(image))
             return image_embeds
     visionModel = VisionModel(ln_vision, visual_encoder)
-    return visionModel
+    # return visionModel
     vmfb_path = "visionModel_fp32_cuda.vmfb"
     if os.path.isfile(vmfb_path):
         shark_module = SharkInference(
@@ -404,7 +504,7 @@ def get_qformer_bert_model(qformer_bert):
             )
             return query_output.last_hidden_state
     qformerBertModel = QformerBertModel(qformer_bert)
-    return qformerBertModel
+    # return qformerBertModel
     vmfb_path = "qformerBertModel_fp32_cuda.vmfb"
     if os.path.isfile(vmfb_path):
         shark_module = SharkInference(
@@ -725,8 +825,8 @@ def compile_llama(
     is_first_llama = False
     if inputs_embeds is not None:
         is_first_llama = True
-        extended_model_name = "first_llama_fp32_padding_170"
-        vmfb_path = "first_llama_fp32_padding_170.vmfb"
+        extended_model_name = "first_llama_fp16_cuda_padding_170_with_fx_latest"
+        vmfb_path = "first_llama_fp16_cuda_padding_170_with_fx_latest.vmfb"
         inputs_embeds_placeholder = TensorPlaceholder.like(
             inputs_embeds, dynamic_axes=[1]
         )
@@ -734,8 +834,8 @@ def compile_llama(
             position_ids, dynamic_axes=[1]
         )
         example_inputs = [inputs_embeds, position_ids, attention_mask]
-        # f16_input_mask = [True, False, False]
-        f16_input_mask = [False, True, True]
+        f16_input_mask = [True, False, False]
+        # f16_input_mask = [False, True, True]
         # fx_g = make_fx(
         #     llama_model,
         #     decomposition_table=get_decompositions(
@@ -754,8 +854,8 @@ def compile_llama(
         # )(inputs_embeds, position_ids, attention_mask)
         # example_inputs = [inputs_embeds_placeholder, position_ids_placeholder, attention_mask_placeholder]
     else:
-        extended_model_name = "second_llama_fp32_padding_170"
-        vmfb_path = "second_llama_fp32_padding_170.vmfb"
+        extended_model_name = "second_llama_fp16_cuda_padding_170_with_fx_latest"
+        vmfb_path = "second_llama_fp16_cuda_padding_170_with_fx_latest.vmfb"
         past_key_value_placeholder = []
         f16_input_mask = [False, False, False]
         for i in past_key_value:
@@ -812,17 +912,14 @@ def compile_llama(
             model_name=extended_model_name,
         )
         print("torch-mlir compiled.")
-        with open(extended_model_name+'_elided.mlir', 'w') as f:
-           with redirect_stdout(f):
-                print(mlir_module.operation.get_asm(large_elements_limit=4))
-        print("Elided IR written")
         shark_module = SharkInference(
             mlir_module,
             device="cuda",
             mlir_dialect="tm_tensor",
         )
         print("Shark module complete.")
-        return _compile_module(shark_module, extended_model_name, [])
+        llama_list.append(_compile_module(shark_module, extended_model_name, []))
+        return
     
     def _remove_nones(fx_g: torch.fx.GraphModule) -> List[int]:
         removed_indexes = []
@@ -942,8 +1039,8 @@ def compile_llama(
     mlir_module = torch_mlir.compile(
         ts_g, example_inputs, output_type="linalg-on-tensors"
     )
-    print("Compilation success. Will write to file now.")
-    from contextlib import redirect_stdout
+    # print("Compilation success. Will write to file now.")
+    # from contextlib import redirect_stdout
     #import sys
     #with open('second_llama_torch_fp32_after_broadcast_fix_elided.mlir', 'w') as sys.stdout:
     #    #with redirect_stdout(f):
@@ -952,9 +1049,14 @@ def compile_llama(
 
     # with open('first_llama_fp32_padding_170.mlir', 'w') as f:
     #    with redirect_stdout(f):
+    #        print(mlir_module.operation.get_asm())
+
+    # with open('first_llama_fp32_padding_170_elided.mlir', 'w') as f:
+    #    with redirect_stdout(f):
     #        print(mlir_module.operation.get_asm(large_elements_limit=4))
 
-    print("Elided IR written into file successfully.")
+    # print("Elided IR written into file successfully.")
+    # return mlir_module
     # if is_first_llama:
     #     with open('first_llama_minigpt_linalg_ir_dynamic.mlir', 'w') as f:
     #         with redirect_stdout(f):
@@ -963,7 +1065,7 @@ def compile_llama(
     #     with open('second_llama_minigpt_linalg_ir_dynamic_after_broadcast_fix.mlir', 'w') as f:
     #         with redirect_stdout(f):
     #             print(mlir_module.operation.get_asm())
-    print("Non-Elided IR written into file successfully.")
+    # print("Non-Elided IR written into file successfully.")
     # import sys
     # sys.exit()
     bytecode_stream = BytesIO()
@@ -1007,10 +1109,27 @@ class Chat:
         if isPyTorchVariant:
             llama_list.append(self.first_llama_model)
             return
-        inputs_embeds = torch.zeros((1,170, 4096), dtype=torch.float32)
-        position_ids = torch.zeros((1,170), dtype=torch.int64)
-        attention_mask = torch.zeros((1,170), dtype=torch.int32)
-        print("Going to compile First Llama")
+        inputs_embeds = torch.ones((1,170, 4096), dtype=torch.float32)
+        position_ids = torch.ones((1,170), dtype=torch.int64)
+        attention_mask = torch.ones((1,170), dtype=torch.int32)
+        # inputs = (inputs_embeds, position_ids, attention_mask,)
+        # print("Going to compile First Llama")
+        # # resnet18 = models.resnet18(pretrained=True).to("cuda").half()
+        # # resnet18.train(False)
+        # # input = (torch.randn(1,3,224,224).cuda().half(),)
+
+        # fx_graph, inputs = import_with_fx(self.first_llama_model, inputs, is_f16=True, f16_input_mask=[True, False, False])
+        # print("FX graph :-")
+        # total_nodes = count_total_nodes(fx_graph)
+        # print(f" The total nodes in the graph is: {total_nodes}")
+        # orig_out = fx_graph(*inputs)[0][:,-1,:]
+        # print(orig_out, "\n\t", orig_out.shape)
+        # print("Min = ", torch.min(orig_out).item())
+        # print("Max = ", torch.max(orig_out).item())
+        # print("Mean = ", torch.mean(orig_out).item())
+        # # print("fp16 output ", orig_out)
+
+        # self.first_llama_model.model = self.first_llama_model.model.to("cuda").half()
         compile_llama(self.first_llama_model, inputs_embeds=inputs_embeds, position_ids=position_ids, attention_mask=attention_mask, llama_list=llama_list, is_fp16=is_fp16)
         print("Compilation complete for First llama. You may check .mlir and .vmfb files")
         # return first_llama_model_shark
@@ -1128,6 +1247,8 @@ class Chat:
             if i == 0:
                 if not isPyTorchVariant:
                     shark_inputs = []
+                    if is_fp16:
+                        model_inputs['inputs_embeds'] = model_inputs['inputs_embeds'].to(torch.float16)
                     shark_inputs.append(model_inputs['inputs_embeds'].detach())
                     shark_inputs.append(model_inputs['position_ids'].detach())
                     shark_inputs.append(model_inputs['attention_mask'].detach())
@@ -1138,6 +1259,11 @@ class Chat:
                     for out_shark in outputs_shark:
                         outputs.append(torch.from_numpy(out_shark))
                     del outputs_shark
+                    # outputs_original = self.first_llama_model.forward(
+                    #     model_inputs['inputs_embeds'],
+                    #     model_inputs['position_ids'],
+                    #     model_inputs['attention_mask'],
+                    # )
                 else:
                     self.compile_first_llama(llama_list=llama_list, is_fp16=is_fp16, isPyTorchVariant=isPyTorchVariant)
                     outputs = llama_list[0](
@@ -1147,19 +1273,19 @@ class Chat:
                     )
                 
                 # x = llama_list[0]
-                address = id(llama_list[0])
+                # address = id(llama_list[0])
 
                 # Access the value at the memory address using c_long
-                value = ctypes.c_long.from_address(address).value
-                print("Reference count = ", value)
-                llama_list.clear()
-                torch.cuda.empty_cache()
-                value = ctypes.c_long.from_address(address).value
-                print("Reference count = ", value)
+                # value = ctypes.c_long.from_address(address).value
+                # print("Reference count (within while loop) = ", value)
+                # llama_list.clear()
+                # torch.cuda.empty_cache()
+                # value = ctypes.c_long.from_address(address).value
+                # print("Reference count = ", value)
                 # del first_llama_model
             else:
                 # print(*list(model_inputs['past_key_values']))
-                isPyTorchVariant = True
+                isPyTorchVariant = False
                 if not isPyTorchVariant:
                     shark_inputs = []
                     shark_inputs.append(model_inputs['input_ids'].detach())
@@ -1168,12 +1294,14 @@ class Chat:
                     for pkv in list(model_inputs['past_key_values']):
                         shark_inputs.append(pkv.detach())
                     # outputs_shark = self.second_llama_model_shark("forward", shark_inputs)
-                    self.compile_second_llama(llama_list=llama_list, is_fp16=is_fp16, isPyTorchVariant=isPyTorchVariant)
+                    if i == 1:
+                        self.compile_second_llama(llama_list=llama_list, is_fp16=is_fp16, isPyTorchVariant=isPyTorchVariant)
                     outputs_shark = llama_list[0]("forward", shark_inputs)
                     # outputs_shark = second_llama_model("forward", shark_inputs)
                     outputs = []
                     for out_shark in outputs_shark:
                         outputs.append(torch.from_numpy(out_shark))
+                    del outputs_shark
                 else:
                     self.compile_second_llama(llama_list=llama_list, is_fp16=is_fp16, isPyTorchVariant=isPyTorchVariant)
                     outputs = llama_list[0](
@@ -1192,6 +1320,30 @@ class Chat:
 
             outputs_logits = outputs[0]
             next_token_logits = outputs_logits[:, -1, :]
+            # out = fx_g(*inputs)[0][:,-1,:]
+            print("fp16 vmfb output :-\n")
+            print(next_token_logits, "\n\t", next_token_logits.shape)
+            print("Min = ", torch.min(next_token_logits).item())
+            print("Max = ", torch.max(next_token_logits).item())
+            print("Mean = ", torch.mean(next_token_logits).item())
+
+            # outputs_logits = outputs_original[0]
+            # next_token_logits = outputs_logits[:, -1, :]
+            # # out = fx_g(*inputs)[0][:,-1,:]
+            # print("fp32 original output :-\n")
+            # print(next_token_logits, "\n\t", next_token_logits.shape)
+            # print("Min = ", torch.min(next_token_logits).item())
+            # print("Max = ", torch.max(next_token_logits).item())
+            # print("Mean = ", torch.mean(next_token_logits).item())
+
+            
+
+            # print("Close ? ",torch.allclose(tensor1, next_token_logits, rtol=1e-4, atol=1e-4))
+            # break
+            if is_fp16:
+                next_token_logits = next_token_logits.to(torch.float32)
+            # import pdb
+            # pdb.set_trace()
 
             # pre-process distribution
             next_token_scores = logits_processor(input_ids, next_token_logits)
@@ -1220,10 +1372,14 @@ class Chat:
             if timesRan >=1 :
                 tmp_attention_mask = torch.cat((model_kwargs['attention_mask'][:, :first_zero],model_kwargs['attention_mask'][:, first_zero+1:]), dim=1)
                 model_kwargs['attention_mask'] = tmp_attention_mask
+                # if is_fp16:
+                #     model_kwargs['attention_mask'] = tmp_attention_mask.to(torch.float16)
                 pkv_list = []
 #                 print(len(model_kwargs['past_key_values']))
                 for pkv_pair_tuple in model_kwargs['past_key_values']:
                     x = torch.cat((pkv_pair_tuple[:,:,:first_zero,:], pkv_pair_tuple[:,:,first_zero+1:,:]), dim=2)
+                    if is_fp16:
+                        x = x.to(torch.float16)
                     pkv_list.append(x)
                 model_kwargs['past_key_values'] = tuple(pkv_list)
 
@@ -1289,19 +1445,19 @@ class Chat:
             image = image.to("cpu")
 
         with self.model.maybe_autocast():
-            shark_visionModel = get_vision_model(self.model.ln_vision, self.model.visual_encoder)
-            # image_embeds = shark_visionModel("forward", (image,))
-            image_embeds = shark_visionModel.forward(image)
+            shark_visionModel, _ = get_vision_model(self.model.ln_vision, self.model.visual_encoder)
+            image_embeds = shark_visionModel("forward", (image,))
+            # image_embeds = shark_visionModel.forward(image)
             # cpu_device = torch.device("cpu")
-            # image_embeds = torch.from_numpy(image_embeds)
+            image_embeds = torch.from_numpy(image_embeds)
             image_embeds = image_embeds.to(device)
             image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(device)
 
             query_tokens = self.model.query_tokens.expand(image_embeds.shape[0], -1, -1).to(device)
-            shark_QformerBertModel = get_qformer_bert_model(self.model.Qformer.bert)
-            # query_output = shark_QformerBertModel("forward", (query_tokens, image_embeds, image_atts,))
-            query_output = shark_QformerBertModel.forward(query_tokens, image_embeds, image_atts)
-            # query_output = torch.from_numpy(query_output)
+            shark_QformerBertModel, _ = get_qformer_bert_model(self.model.Qformer.bert)
+            query_output = shark_QformerBertModel("forward", (query_tokens, image_embeds, image_atts,))
+            # query_output = shark_QformerBertModel.forward(query_tokens, image_embeds, image_atts)
+            query_output = torch.from_numpy(query_output)
 
             inputs_llama = self.model.llama_proj(query_output)
             # atts_llama = torch.ones(inputs_llama.size()[:-1], dtype=torch.long).to(image.device)
