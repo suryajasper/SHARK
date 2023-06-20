@@ -117,15 +117,15 @@ def get_vulkan_target_triple(device_name):
     # Intel Targets
     elif any(x in device_name for x in ("A770", "A750")):
         triple = f"arc-770-{system_os}"
-    else:
-        triple = None
 
     # Adreno Targets
     elif all(x in device_name for x in ("Adreno", "740")):
         triple = f"adreno-a740-{system_os}"
 
-    return triple
+    else:
+        triple = None
 
+    return triple
 
 def get_vulkan_triple_flag(device_name="", device_num=0, extra_args=[]):
     for flag in extra_args:

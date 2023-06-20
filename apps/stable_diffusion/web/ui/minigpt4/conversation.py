@@ -891,9 +891,8 @@ def compile_llama(
         # )
         # example_inputs = [input_ids, position_ids, attention_mask_placeholder, *past_key_value_placeholder]
 
-    llama_args = [
+    llama_extra_args = [
         '--iree-spirv-index-bits=64',
-        '--iree-hal-dump-executable-benchmarks-to=/tmp/minigpt4_dispatches/'
     ]
 
     args.load_vmfb = True
@@ -910,7 +909,7 @@ def compile_llama(
             # Access the value at the memory address using c_long
             value = ctypes.c_long.from_address(address).value
             print("Reference count within compilation = ", value)
-            llama_list[0].load_module(vmfb_path, extra_args=llama_args)
+            llama_list[0].load_module(vmfb_path, extra_args=llama_extra_args)
             return
     if is_fp16:
         mlir_module, _ = import_with_fx(
@@ -918,7 +917,7 @@ def compile_llama(
             inputs=example_inputs,
             is_f16=True,
             f16_input_mask=f16_input_mask,
-            debug=True,
+            debug=False,
             model_name=extended_model_name,
             return_str=False,
         )
@@ -929,7 +928,7 @@ def compile_llama(
             mlir_dialect="tm_tensor",
         )
         print("Shark module complete.")
-        llama_list.append(_compile_module(shark_module, extended_model_name, llama_args))
+        llama_list.append(_compile_module(shark_module, extended_model_name, llama_extra_args))
         return
     
     def _remove_nones(fx_g: torch.fx.GraphModule) -> List[int]:
