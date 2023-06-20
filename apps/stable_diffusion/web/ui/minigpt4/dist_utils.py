@@ -13,6 +13,8 @@ import torch
 import torch.distributed as dist
 import timm.models.hub as timm_hub
 
+from shark.iree_utils.vulkan_utils import get_vulkan_devices, get_vulkan_device_name
+
 
 def setup_for_distributed(is_master):
     """
@@ -61,7 +63,7 @@ def init_distributed_mode(args):
         args.gpu = int(os.environ["LOCAL_RANK"])
     elif "SLURM_PROCID" in os.environ:
         args.rank = int(os.environ["SLURM_PROCID"])
-        args.gpu = args.rank % torch.cuda.device_count()
+        args.gpu = args.rank % len(get_vulkan_devices())
     else:
         print("Not using distributed mode")
         args.distributed = False
@@ -69,7 +71,7 @@ def init_distributed_mode(args):
 
     args.distributed = True
 
-    torch.cuda.set_device(args.gpu)
+    get_vulkan_device_name(args.gpu)
     args.dist_backend = "nccl"
     print(
         "| distributed init (rank {}, world {}): {}".format(

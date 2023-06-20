@@ -20,11 +20,14 @@ import iree.runtime as ireert
 from sys import platform
 from shark.iree_utils.vulkan_target_env_utils import get_vulkan_target_env_flag
 
-
-def get_vulkan_device_name(device_num=0):
+def get_vulkan_devices():
     vulkaninfo_dump, _ = run_cmd("vulkaninfo")
     vulkaninfo_dump = vulkaninfo_dump.split(linesep)
     vulkaninfo_list = [s.strip() for s in vulkaninfo_dump if "deviceName" in s]
+    return vulkaninfo_list
+
+def get_vulkan_device_name(device_num=0):
+    vulkaninfo_list = get_vulkan_devices()
     if len(vulkaninfo_list) == 0:
         raise ValueError("No device name found in VulkanInfo!")
     if len(vulkaninfo_list) > 1:

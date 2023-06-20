@@ -8,7 +8,7 @@ model:
   low_resource: False
   prompt_path: "apps/stable_diffusion/web/ui/minigpt4/prompts/alignment.txt"
   prompt_template: '###Human: {} ###Assistant: '
-  ckpt: '/home/abhishek/prerained_minigpt4_7b.pth'
+  ckpt: '/home/nod/Documents/minigpt4_cache/prerained_minigpt4_7b.pth'
 
 
 datasets:

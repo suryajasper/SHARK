@@ -13,7 +13,7 @@ model:
   num_query_token: 32
 
   # Vicuna
-  llama_model: "/home/abhishek/vicuna_weights/vicuna_weights/"
+  llama_model: "/home/nod/Documents/minigpt4_cache/vicuna_weights/"
 
   # generation configs
   prompt: ""

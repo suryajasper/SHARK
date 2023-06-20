@@ -177,7 +177,8 @@ class SharkImporter:
         np.savez(os.path.join(dir, outputs_name), *outputs)
         np.save(os.path.join(dir, func_file_name), np.array(func_name))
         if self.frontend == "torch":
-            with open(os.path.join(dir, model_name_mlir), "wb") as mlir_file:
+            write_mode = 'w' if type(mlir_data) == str else 'wb'
+            with open(os.path.join(dir, model_name_mlir), write_mode) as mlir_file:
                 mlir_file.write(mlir_data)
         hash_gen_attempts = 2
         for i in range(hash_gen_attempts):

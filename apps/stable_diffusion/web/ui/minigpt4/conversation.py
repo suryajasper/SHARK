@@ -102,10 +102,10 @@ class MiniGPT4SHARK(torch.nn.Module):
         # if on cpu, don't use autocast
         # if on gpu, use autocast with dtype if provided, otherwise use torch.float16
         # enable_autocast = self.device != torch.device("cpu")
-        enable_autocast = True
+        enable_autocast = False
 
         if enable_autocast:
-            return torch.cuda.amp.autocast(dtype=dtype)
+            return torch.autocast(args.device, dtype=dtype)
         else:
             return contextlib.nullcontext()
         
@@ -352,7 +352,7 @@ import numpy as np
 
 
 # Custom shark backend.
-def shark_backend(fx_g, inputs, device:str = "cuda"):
+def shark_backend(fx_g, inputs, device:str = args.device):
     ts_graph = torch.jit.script(fx_g)
     mlir_module = torch_mlir.compile(ts_graph, inputs, output_type="linalg-on-tensors")
     bytecode_stream = io.BytesIO()
@@ -451,7 +451,7 @@ CONV_VISION = Conversation(
     sep="###",
 )
 
-args.device = "cuda"
+# args.device = args.device
 def get_vision_model(ln_vision, visual_encoder):
     class VisionModel(torch.nn.Module):
         def __init__(self, ln_vision, visual_encoder):
@@ -461,9 +461,11 @@ def get_vision_model(ln_vision, visual_encoder):
         def forward(self, image):
             image_embeds = self.ln_vision(self.visual_encoder(image))
             return image_embeds
-    visionModel = VisionModel(ln_vision, visual_encoder)
+    
     # return visionModel
-    vmfb_path = "visionModel_fp32_cuda.vmfb"
+    visionModel = VisionModel(ln_vision, visual_encoder)
+    visionModel_name = f"visionModel_fp32_{args.device}"
+    vmfb_path = f"{visionModel_name}.vmfb" 
     if os.path.isfile(vmfb_path):
         shark_module = SharkInference(
             None,
@@ -473,21 +475,21 @@ def get_vision_model(ln_vision, visual_encoder):
         print(f"loading existing vmfb from: {vmfb_path}")
         shark_module.load_module(vmfb_path, extra_args=[])
         return shark_module, None
-    print("Compiling visionModel_fp32_cuda")
+    print(f"Compiling {visionModel_name}")
     shark_visionModel, visionModel_mlir = compile_through_fx(
         visionModel,
         [torch.randint(3, (1, 3, 224, 224), dtype=torch.float32)],
-        extended_model_name="visionModel_fp32_cuda",
+        extended_model_name=visionModel_name,
         debug=False,
         generate_vmfb=True,
         save_dir=os.getcwd(),
         extra_args=[],
         base_model_id=None,
-        model_name="visionModel_fp32_cuda",
+        model_name=visionModel_name,
         precision=None,
         return_mlir=False,
     )
-    print("Generated visionModel_fp32_cuda.vmfb")
+    print(f"Generated {visionModel_name}.vmfb")
     return shark_visionModel, visionModel_mlir
 
 def get_qformer_bert_model(qformer_bert):
@@ -504,8 +506,10 @@ def get_qformer_bert_model(qformer_bert):
             )
             return query_output.last_hidden_state
     qformerBertModel = QformerBertModel(qformer_bert)
+    qformer_name = f"qformerBertModel_fp32_{args.device}"
+    
     # return qformerBertModel
-    vmfb_path = "qformerBertModel_fp32_cuda.vmfb"
+    vmfb_path = f"{qformer_name}.vmfb"
     if os.path.isfile(vmfb_path):
         shark_module = SharkInference(
             None,
@@ -515,23 +519,24 @@ def get_qformer_bert_model(qformer_bert):
         print(f"loading existing vmfb from: {vmfb_path}")
         shark_module.load_module(vmfb_path, extra_args=[])
         return shark_module, None
-    print("Compiling qformerBertModel_fp32_cuda")
+
+    print(f"Compiling {qformer_name}")
     shark_QformerBertModel, qformerBertModel_mlir = compile_through_fx(
         qformerBertModel,
         [torch.randint(3, (1, 32, 768), dtype=torch.float32),
          torch.randint(3, (1, 257, 1408), dtype=torch.float32),
          torch.randint(3, (1, 257), dtype=torch.int64)],
-        extended_model_name="qformerBertModel_fp32_cuda",
+        extended_model_name=qformer_name,
         debug=False,
         generate_vmfb=True,
         save_dir=os.getcwd(),
         extra_args=[],
         base_model_id=None,
-        model_name="qformerBertModel_fp32_cuda",
+        model_name=qformer_name,
         precision=None,
         return_mlir=False,
     )
-    print("Generated qformerBertModel_fp32_cuda.vmfb")
+    print(f"Generated {qformer_name}.vmfb")
     return shark_QformerBertModel, qformerBertModel_mlir
 
 class FirstLlamaModel(torch.nn.Module):
@@ -825,8 +830,8 @@ def compile_llama(
     is_first_llama = False
     if inputs_embeds is not None:
         is_first_llama = True
-        extended_model_name = "first_llama_fp16_cuda_padding_170_with_fx_latest"
-        vmfb_path = "first_llama_fp16_cuda_padding_170_with_fx_latest.vmfb"
+        extended_model_name = f"first_llama_{'fp16' if is_fp16 else 'fp32'}_{args.device}_padding_170_with_fx_latest"
+        vmfb_path = f"{extended_model_name}.vmfb"
         inputs_embeds_placeholder = TensorPlaceholder.like(
             inputs_embeds, dynamic_axes=[1]
         )
@@ -854,8 +859,8 @@ def compile_llama(
         # )(inputs_embeds, position_ids, attention_mask)
         # example_inputs = [inputs_embeds_placeholder, position_ids_placeholder, attention_mask_placeholder]
     else:
-        extended_model_name = "second_llama_fp16_cuda_padding_170_with_fx_latest"
-        vmfb_path = "second_llama_fp16_cuda_padding_170_with_fx_latest.vmfb"
+        extended_model_name = f"second_llama_{'fp16' if is_fp16 else 'fp32'}_{args.device}_padding_170_with_fx_latest"
+        vmfb_path = f"{extended_model_name}.vmfb"
         past_key_value_placeholder = []
         f16_input_mask = [False, False, False]
         for i in past_key_value:
@@ -886,13 +891,18 @@ def compile_llama(
         # )
         # example_inputs = [input_ids, position_ids, attention_mask_placeholder, *past_key_value_placeholder]
 
+    llama_args = [
+        '--iree-spirv-index-bits=64',
+        '--iree-hal-dump-executable-benchmarks-to=/tmp/minigpt4_dispatches/'
+    ]
+
     args.load_vmfb = True
     if args.load_vmfb:
         if os.path.isfile(vmfb_path):
             print(f"loading existing vmfb from: {vmfb_path}")
             llama_list.append(SharkInference(
                 None,
-                device="cuda",
+                device=args.device,
                 mlir_dialect="tm_tensor",
             ))
             address = id(llama_list[0])
@@ -900,7 +910,7 @@ def compile_llama(
             # Access the value at the memory address using c_long
             value = ctypes.c_long.from_address(address).value
             print("Reference count within compilation = ", value)
-            llama_list[0].load_module(vmfb_path, extra_args=[])
+            llama_list[0].load_module(vmfb_path, extra_args=llama_args)
             return
     if is_fp16:
         mlir_module, _ = import_with_fx(
@@ -908,17 +918,18 @@ def compile_llama(
             inputs=example_inputs,
             is_f16=True,
             f16_input_mask=f16_input_mask,
-            debug=False,
+            debug=True,
             model_name=extended_model_name,
+            return_str=False,
         )
         print("torch-mlir compiled.")
         shark_module = SharkInference(
             mlir_module,
-            device="cuda",
+            device=args.device,
             mlir_dialect="tm_tensor",
         )
         print("Shark module complete.")
-        llama_list.append(_compile_module(shark_module, extended_model_name, []))
+        llama_list.append(_compile_module(shark_module, extended_model_name, llama_args))
         return
     
     def _remove_nones(fx_g: torch.fx.GraphModule) -> List[int]:
@@ -1017,7 +1028,7 @@ def compile_llama(
     # need_to_compile = True
             # shark_module = SharkInference(
             #     None,
-            #     device="cuda",
+            #     device=args.device,
             #     mlir_dialect="tm_tensor",
             # )
             # print(f"loading existing vmfb from: {vmfb_path}")
@@ -1030,7 +1041,7 @@ def compile_llama(
             # return shark_module
             # return SharkInference(
             #     None,
-            #     device="cuda",
+            #     device=args.device,
             #     mlir_dialect="tm_tensor",
             # ).load_module(vmfb_path, extra_args=[])
 
@@ -1073,7 +1084,7 @@ def compile_llama(
     bytecode = bytecode_stream.getvalue()
 
     shark_module = SharkInference(
-        mlir_module=bytecode, device="cuda", mlir_dialect="tm_tensor"
+        mlir_module=bytecode, device=args.device, mlir_dialect="tm_tensor"
     )
     shark_module = _compile_module(shark_module, extended_model_name, [])
     return shark_module
@@ -1114,7 +1125,7 @@ class Chat:
         attention_mask = torch.ones((1,170), dtype=torch.int32)
         # inputs = (inputs_embeds, position_ids, attention_mask,)
         # print("Going to compile First Llama")
-        # # resnet18 = models.resnet18(pretrained=True).to("cuda").half()
+        # # resnet18 = models.resnet18(pretrained=True).to(args.device).half()
         # # resnet18.train(False)
         # # input = (torch.randn(1,3,224,224).cuda().half(),)
 
@@ -1129,7 +1140,7 @@ class Chat:
         # print("Mean = ", torch.mean(orig_out).item())
         # # print("fp16 output ", orig_out)
 
-        # self.first_llama_model.model = self.first_llama_model.model.to("cuda").half()
+        # self.first_llama_model.model = self.first_llama_model.model.to(args.device).half()
         compile_llama(self.first_llama_model, inputs_embeds=inputs_embeds, position_ids=position_ids, attention_mask=attention_mask, llama_list=llama_list, is_fp16=is_fp16)
         print("Compilation complete for First llama. You may check .mlir and .vmfb files")
         # return first_llama_model_shark
